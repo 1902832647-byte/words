@@ -881,6 +881,7 @@ textarea.field{line-height:1.5}
     else if (fStatus.classList.contains('warn')) setStatus('');
   }
   const draftIsEmpty = () => draft.every(s => !s.mean.trim() && !s.def.trim() && !s.examples.join('').trim());
+  setTimeout(() => loadDict().catch(() => {}), 1500);
   let lookTimer, lookSeq = 0;
   fWord.addEventListener('input', () => {
     checkWord(); clearTimeout(lookTimer);
@@ -889,44 +890,98 @@ textarea.field{line-height:1.5}
   fWord.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); if (!fLookup.disabled) lookup(false); } });
   fLookup.addEventListener('click', () => lookup(false));
 
-  // 联网查词（Free Dictionary API）
+  // 查词：先查自带的离线词典（国内也能用，断网也能用），再顺便联网补英文例句和真人发音
+  let dictP = null;
+  function loadDict(){
+    if (!dictP) dictP = fetch('dict.json').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).catch(e => { dictP = null; throw e; });
+    return dictP;
+  }
+  const POS_NORM = {'vt.':'v.','vi.':'v.','v.':'v.','n.':'n.','a.':'adj.','adj.':'adj.','ad.':'adv.','adv.':'adv.','prep.':'prep.','conj.':'conj.','pron.':'pron.','int.':'int.','interj.':'int.','num.':'num.','art.':'art.','aux.':'aux.','abbr.':'abbr.'};
+  function fixPhon(p){
+    if (!p) return '';
+    p = p.replace(/ә/g,'ə').replace(/:/g,'ː').replace(/,/g,'ˌ').replace(/'/g,'ˈ');
+    return '/' + p + '/';
+  }
+  function findLocal(dict, w){
+    const k = w.toLowerCase();
+    if (dict[k]) return [k, dict[k]];
+    const tries = [k.replace(/ies$/,'y'), k.replace(/es$/,''), k.replace(/s$/,''), k.replace(/ied$/,'y'), k.replace(/ed$/,''), k.replace(/ed$/,'e'), k.replace(/ing$/,''), k.replace(/ing$/,'e'), k.replace(/(.)\1ing$/,'$1'), k.replace(/(.)\1ed$/,'$1')];
+    for (const t of tries) if (t !== k && dict[t]) return [t, dict[t]];
+    return null;
+  }
+  function localSenses(tr){
+    const map = new Map();
+    tr.split('\n').forEach(line => {
+      const m = line.match(/^([a-z]+\.)\s*(.*)$/i);
+      let pos = '', text = line;
+      if (m && POS_NORM[m[1].toLowerCase()]){ pos = POS_NORM[m[1].toLowerCase()]; text = m[2]; }
+      const items = text.split(/[,，;；]\s*/).map(x => x.trim()).filter(Boolean);
+      if (!map.has(pos)) map.set(pos, []);
+      map.get(pos).push(...items);
+    });
+    return [...map.entries()].slice(0, 4).map(([pos, items]) => ({pos, mean:[...new Set(items)].slice(0, 4).join('；'), def:'', examples:[]}));
+  }
+  async function onlineExtra(w){
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 5000);
+    try{
+      const res = await fetch('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(w.toLowerCase()), {signal:ctl.signal});
+      if (!res.ok) return null;
+      return await res.json();
+    }catch(e){ return null; } finally { clearTimeout(t); }
+  }
   async function lookup(auto){
     const w = fWord.value.trim(); if (!w) return;
     if (auto && norm(w) === lookedUp) return;
     const seq = ++lookSeq;
-    if (!navigator.onLine){ setStatus('现在没联网，可以先自己填，之后再点「查词」'); return; }
     setStatus('<span class="spin"></span>正在查…');
-    try{
-      const res = await fetch('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(w.toLowerCase()));
-      if (seq !== lookSeq) return;
-      if (res.status === 404){ setStatus('词典里没找到这个词，可以自己填'); lookedUp = norm(w); return; }
-      if (!res.ok) throw new Error(res.status);
-      const data = await res.json();
-      if (seq !== lookSeq) return;
-      lookedUp = norm(w);
-      const phs = data.flatMap(d => d.phonetics || []);
+    let hit = null;
+    try{ hit = findLocal(await loadDict(), w); }catch(e){}
+    if (seq !== lookSeq) return;
+    lookedUp = norm(w);
+    let filled = false;
+    if (hit){
+      const [, [phon, tr]] = hit;
+      if (phon && !fPhon.value.trim()) fPhon.value = fixPhon(phon);
+      if (draftIsEmpty()){ draft = localSenses(tr); renderSenses(); filled = true; }
+      setStatus(filled ? '查到啦，中文意思已经帮你填好，可以再改改' : '查到了音标。你已经写了意思，就没有覆盖');
+    }
+    // 联网补充：英文例句 + 真人发音（连不上也没关系）
+    if (!navigator.onLine){ if (!hit) setStatus('词典里没找到这个词，可以自己填'); return; }
+    const data = await onlineExtra(w);
+    if (seq !== lookSeq) return;
+    if (!data || !Array.isArray(data)){ if (!hit) setStatus('词典里没找到这个词，可以自己填'); return; }
+    const phs = data.flatMap(d => d.phonetics || []);
+    const au = phs.map(p => p.audio).filter(Boolean);
+    audioUrl = au.find(a => /-us\.mp3$/.test(a)) || au.find(a => /-uk\.mp3$/.test(a)) || au[0] || audioUrl;
+    const byPos = new Map();
+    data.forEach(d => (d.meanings || []).forEach(m => {
+      const p = POS_MAP[m.partOfSpeech] || m.partOfSpeech || '';
+      if (!byPos.has(p)) byPos.set(p, []);
+      byPos.get(p).push(...(m.definitions || []));
+    }));
+    if (!hit){
       const phon = (data.find(d => d.phonetic) || {}).phonetic || (phs.find(p => p.text) || {}).text || '';
-      const au = phs.map(p => p.audio).filter(Boolean);
-      audioUrl = au.find(a => /-us\.mp3$/.test(a)) || au.find(a => /-uk\.mp3$/.test(a)) || au[0] || audioUrl;
       if (phon && !fPhon.value.trim()) fPhon.value = phon;
-      const byPos = new Map();
-      data.forEach(d => (d.meanings || []).forEach(m => {
-        const p = POS_MAP[m.partOfSpeech] || m.partOfSpeech || '';
-        if (!byPos.has(p)) byPos.set(p, []);
-        byPos.get(p).push(...(m.definitions || []));
-      }));
       const found = [...byPos.entries()].slice(0, 4).map(([pos, defs]) => {
-        const first = defs[0] || {};
-        const ex = first.example || (defs.find(d => d.example) || {}).example;
+        const first = defs[0] || {}; const ex = first.example || (defs.find(d => d.example) || {}).example;
         return {pos, mean:'', def:first.definition || '', examples: ex ? [ex] : []};
       });
-      if (found.length && draftIsEmpty()){ draft = found; renderSenses(); setStatus(`找到 ${found.length} 种词性，帮你填好了，补上中文意思就行`); }
-      else if (found.length) setStatus('查到了音标和发音。你已经写了意思，就没有覆盖');
-      else setStatus('词典里没找到释义，可以自己填');
-    }catch(err){
-      if (seq !== lookSeq) return;
-      setStatus('没查到，可能网络不太好。可以先自己填', true);
+      if (found.length && draftIsEmpty()){ draft = found; renderSenses(); setStatus('查到了英文释义和例句，补上中文意思就行'); }
+      else setStatus('词典里没找到这个词，可以自己填');
+      return;
     }
+    if (!filled) return;
+    // 把英文释义和例句挂到对应词性上
+    let added = 0;
+    draft.forEach(s => {
+      const defs = byPos.get(s.pos);
+      if (!defs || !defs.length) return;
+      const ex = (defs.find(d => d.example) || {}).example;
+      if (!s.def) s.def = defs[0].definition || '';
+      if (ex && !s.examples.length){ s.examples = [ex]; added++; }
+    });
+    if (draftIsEmpty() === false){ renderSenses(); }
+    setStatus(added ? '查到啦，中文意思和例句都帮你填好了' : '查到啦，中文意思已经帮你填好，可以再改改');
   }
   function openWordSheet(id, preset){
     editingId = id; lookedUp = ''; clearTimeout(lookTimer); lookSeq++;
@@ -939,7 +994,7 @@ textarea.field{line-height:1.5}
     if (!draft.length) draft = [emptySense()];
     const ctxBook = cur === 1 && shelfBook && shelfBook !== MARK_ID ? shelfBook : null;
     pickBook = w ? w.groupId : (ctxBook || (pickBook && bookOf(pickBook) ? pickBook : S.groups[0].id));
-    setStatus(w ? '' : '输入单词，会自动帮你查音标、词性和例句');
+    setStatus(w ? '' : '输入单词，会自动帮你查音标、词性和中文意思');
     renderSenses(); renderBookChips(); checkWord();
     openSheet($('#wordSheet'), preset ? null : fWord);
     if (preset && !w) lookup(true);
