@@ -1,4 +1,4 @@
-const CACHE = 'shici-v4';
+const CACHE = 'shici-v5';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon.png', './dict.json'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS))); self.skipWaiting(); });
 self.addEventListener('activate', e => {
