@@ -1,0 +1,10 @@
+{
+  "name": "拾词",
+  "short_name": "拾词",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#efefee",
+  "theme_color": "#efefee",
+  "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }]
+}
